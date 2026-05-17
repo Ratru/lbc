@@ -123,14 +123,24 @@ def extract_spans(doc_path: str) -> list:
     return spans
 
 
-def resolve_fontname(span: TextSpan, page: fitz.Page) -> str:
-    for name in [span.font, span.font.split("+", 1)[-1]]:
-        try:
-            rc = page.insert_textbox(fitz.Rect(0, 0, 1, 1), "", fontname=name)
-            if rc >= 0:
-                return name
-        except Exception:
-            pass
+def resolve_fontname(span: TextSpan, page: fitz.Page, doc: fitz.Document) -> str:
+    """Try to re-embed the original PDF font; fall back to Base-14."""
+    target = span.font.split("+", 1)[-1].lower()
+    for f in page.get_fonts(full=True):
+        xref = f[0]
+        basefont = f[3]
+        if not xref:
+            continue
+        if basefont.split("+", 1)[-1].lower() == target or basefont.lower() == span.font.lower():
+            try:
+                font_data = doc.extract_font(xref)
+                buf = font_data[3]
+                if buf:
+                    fname = f"F{xref}"
+                    page.insert_font(fontname=fname, fontbuffer=buf)
+                    return fname
+            except Exception:
+                pass
     bold = bool(span.flags & 16)
     italic = bool(span.flags & 2)
     return BASE14_MAP[(bold, italic)]
@@ -148,7 +158,7 @@ def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
             page.add_redact_annot(fitz.Rect(span.bbox))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         for span, new_text in page_edits:
-            font_name = resolve_fontname(span, page)
+            font_name = resolve_fontname(span, page, doc)
             rc = page.insert_textbox(
                 fitz.Rect(span.bbox),
                 new_text,
