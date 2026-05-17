@@ -97,18 +97,22 @@ def extract_spans(doc_path: str) -> list:
     idx = 0
     for page_num in range(len(doc)):
         page = doc[page_num]
-        rawdict = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-        for block in rawdict["blocks"]:
+        textdict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        for block in textdict["blocks"]:
             if block["type"] != 0:
                 continue
             for line in block["lines"]:
                 for span in line["spans"]:
-                    if span["text"].strip():
+                    text = span.get("text", "")
+                    if not text:
+                        # PyMuPDF 1.24+: assemble text from chars if key missing
+                        text = "".join(c.get("c", "") for c in span.get("chars", []))
+                    if text.strip():
                         spans.append(TextSpan(
                             page_num=page_num,
                             span_idx=idx,
                             bbox=tuple(span["bbox"]),
-                            text=span["text"],
+                            text=text,
                             font=span["font"],
                             size=round(span["size"], 1),
                             color=span["color"],
