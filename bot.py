@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
  STEP_BANK, STEP_RECEIPT, CONFIRM) = range(10)
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-# Golos Text — свободный шрифт, визуально близкий к TinkoffSans, полная кириллица.
-# Встроенные в PDF шрифты Т-Банка — subset (только глифы оригинала), новый текст
-# ими не отрисовать, поэтому используем Golos Text как замену.
-FONT_REGULAR = os.path.join(_DIR, "GolosText-Regular.ttf")
-FONT_MEDIUM  = os.path.join(_DIR, "GolosText-Medium.ttf")
+# TinkoffSans — оригинальный шрифт квитанций Т-Банка (полные начертания).
+# Встроенный в PDF шрифт — subset (только глифы оригинала, без cmap), новый
+# текст им не отрисовать, поэтому используем полные файлы шрифта.
+FONT_REGULAR = os.path.join(_DIR, "TinkoffSans-Regular.ttf")
+FONT_MEDIUM  = os.path.join(_DIR, "TinkoffSans-Medium.ttf")
 
 _font_cache: dict[str, "fitz.Font"] = {}
 
