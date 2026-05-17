@@ -34,8 +34,19 @@ logger = logging.getLogger(__name__)
  STEP_BANK, STEP_RECEIPT, CONFIRM) = range(10)
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_REGULAR = os.path.join(_DIR, "DejaVuSans.ttf")
-FONT_BOLD    = os.path.join(_DIR, "DejaVuSans-Bold.ttf")
+# Golos Text — свободный шрифт, визуально близкий к TinkoffSans, полная кириллица.
+# Встроенные в PDF шрифты Т-Банка — subset (только глифы оригинала), новый текст
+# ими не отрисовать, поэтому используем Golos Text как замену.
+FONT_REGULAR = os.path.join(_DIR, "GolosText-Regular.ttf")
+FONT_MEDIUM  = os.path.join(_DIR, "GolosText-Medium.ttf")
+
+_font_cache: dict[str, "fitz.Font"] = {}
+
+
+def load_font(path: str) -> "fitz.Font":
+    if path not in _font_cache:
+        _font_cache[path] = fitz.Font(fontfile=path)
+    return _font_cache[path]
 
 
 @dataclass
@@ -43,6 +54,7 @@ class TextSpan:
     page_num: int
     span_idx: int
     bbox: tuple
+    origin: tuple
     text: str
     font: str
     size: float
@@ -86,7 +98,6 @@ class UserSession:
     spans:        list
     file_name:    str
     fields:       ReceiptFields
-    font_buffers: dict = field(default_factory=dict)
     values:       ReceiptValues = field(default_factory=ReceiptValues)
 
 
@@ -94,26 +105,6 @@ sessions: dict[int, UserSession] = {}
 
 
 # ── PDF extraction ────────────────────────────────────────────────────────────
-
-def extract_font_buffers(doc_path: str) -> dict:
-    """Extract all embedded font buffers from PDF, keyed by base font name."""
-    doc = fitz.open(doc_path)
-    fonts = {}
-    for page_num in range(len(doc)):
-        for f in doc.get_page_fonts(page_num, full=True):
-            xref, ext, ftype, basefont, name, enc, *_ = f
-            if not xref or basefont in fonts:
-                continue
-            try:
-                buf = doc.extract_font(xref)[3]
-                if buf:
-                    fonts[basefont] = buf
-                    fonts[basefont.split("+", 1)[-1]] = buf
-            except Exception:
-                pass
-    doc.close()
-    return fonts
-
 
 def extract_spans(doc_path: str) -> list:
     doc = fitz.open(doc_path)
@@ -135,6 +126,7 @@ def extract_spans(doc_path: str) -> list:
                             page_num=page_num,
                             span_idx=idx,
                             bbox=tuple(span["bbox"]),
+                            origin=tuple(span["origin"]),
                             text=text,
                             font=span["font"],
                             size=round(span["size"], 1),
@@ -215,7 +207,9 @@ def build_edits(session: UserSession) -> dict:
             edits[f.datetime_idx] = f"{new_date}  {new_time}"
 
     if v.amount:
-        amt = format_amount(v.amount)
+        # Перед знаком ₽ в оригинале стоит пробел — сохраняем его, чтобы при
+        # выравнивании по правому краю цифры не прилипали к символу рубля.
+        amt = format_amount(v.amount) + " "
         if f.itogo_idx is not None:
             edits[f.itogo_idx] = amt
         if f.summa_idx is not None:
@@ -233,20 +227,20 @@ def build_edits(session: UserSession) -> dict:
 
 # ── PDF save ──────────────────────────────────────────────────────────────────
 
-def get_font(span: TextSpan, font_buffers: dict) -> fitz.Font:
-    """Get the best available font for a span: original PDF font → DejaVu fallback."""
-    for key in (span.font, span.font.split("+", 1)[-1]):
-        buf = font_buffers.get(key)
-        if buf:
-            try:
-                return fitz.Font(fontbuffer=buf)
-            except Exception:
-                pass
-    font_file = FONT_BOLD if (span.flags & 16) else FONT_REGULAR
-    return fitz.Font(fontfile=font_file)
+def pick_font_file(span: TextSpan) -> str:
+    """Medium для жирных надписей («Итого»), Regular для остального."""
+    name = span.font.lower()
+    is_medium = (
+        "medium"   in name
+        or "bold"  in name
+        or "semibold" in name
+        or "black" in name
+        or bool(span.flags & 16)
+    )
+    return FONT_MEDIUM if is_medium else FONT_REGULAR
 
 
-def apply_edits(src_path: str, spans: list, edits: dict, font_buffers: dict) -> bytes:
+def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
     doc = fitz.open(src_path)
     edits_by_page: dict[int, list] = defaultdict(list)
     for idx, new_text in edits.items():
@@ -254,14 +248,33 @@ def apply_edits(src_path: str, spans: list, edits: dict, font_buffers: dict) -> 
 
     for page_num, page_edits in edits_by_page.items():
         page = doc[page_num]
+        page_w = page.rect.width
+
+        # 1. Стираем старый текст — по одному apply_redactions на страницу.
+        #    graphics=NONE: не трогаем фон и линии-разделители квитанции.
         for span, _ in page_edits:
             page.add_redact_annot(fitz.Rect(span.bbox))
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+        )
+
+        # 2. Пишем новый текст: по базовой линии (origin), с учётом выравнивания.
         for span, new_text in page_edits:
-            font = get_font(span, font_buffers)
+            font = load_font(pick_font_file(span))
+            text_w = font.text_length(new_text, fontsize=span.size)
+
+            # Значения правой колонки выровнены по правому краю исходного span,
+            # подписи левой колонки (дата, № квитанции) — по левому.
+            right_aligned = span.bbox[0] > page_w / 2
+            if right_aligned:
+                x = span.bbox[2] - text_w
+            else:
+                x = span.bbox[0]
+            y = span.origin[1]
+
             tw = fitz.TextWriter(page.rect)
-            tw.append(fitz.Point(span.bbox[0], span.bbox[3]), new_text,
-                      font=font, fontsize=span.size)
+            tw.append(fitz.Point(x, y), new_text, font=font, fontsize=span.size)
             tw.write_text(page, color=span.color_rgb())
 
     buf = io.BytesIO()
@@ -414,12 +427,10 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return WAITING_PDF
 
     fields = detect_receipt_fields(spans)
-    font_buffers = extract_font_buffers(doc_path)
     sessions[chat_id] = UserSession(
         doc_path=doc_path, spans=spans,
         file_name=doc.file_name or "document.pdf",
         fields=fields,
-        font_buffers=font_buffers,
     )
     session = sessions[chat_id]
 
@@ -561,7 +572,7 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return WAITING_PDF
 
     try:
-        pdf_bytes = apply_edits(session.doc_path, session.spans, edits, session.font_buffers)
+        pdf_bytes = apply_edits(session.doc_path, session.spans, edits)
     except Exception as e:
         logger.error("apply_edits: %s", e)
         await query.edit_message_text("❌ Ошибка при сохранении PDF.")
