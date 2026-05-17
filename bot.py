@@ -78,6 +78,9 @@ class ReceiptFields:
     recipient_idx: int | None = None
     bank_idx:      int | None = None
     receipt_idx:   int | None = None
+    # "card"  — шаблон 1 (перевод по карте, «Карта получателя»)
+    # "phone" — шаблоны 2/3 (перевод по телефону, «Телефон получателя»)
+    card_kind:     str = "card"
 
 
 @dataclass
@@ -162,16 +165,24 @@ def detect_receipt_fields(spans: list) -> ReceiptFields:
             f.receipt_idx = s.span_idx
 
     for label, attr in [
-        ("Итого",            "itogo_idx"),
-        ("Сумма",            "summa_idx"),
-        ("Отправитель",      "sender_idx"),
-        ("Карта получателя", "card_idx"),
-        ("Получатель",       "recipient_idx"),
-        ("Банк получателя",  "bank_idx"),
+        ("Итого",           "itogo_idx"),
+        ("Сумма",           "summa_idx"),
+        ("Отправитель",     "sender_idx"),
+        ("Получатель",      "recipient_idx"),
+        ("Банк получателя", "bank_idx"),
     ]:
         span = find_right_of_label(spans, label)
         if span:
             setattr(f, attr, span.span_idx)
+
+    # Шаблон 1 — перевод по карте, шаблоны 2/3 — перевод по телефону.
+    card = find_right_of_label(spans, "Карта получателя")
+    if card:
+        f.card_idx, f.card_kind = card.span_idx, "card"
+    else:
+        phone = find_right_of_label(spans, "Телефон получателя")
+        if phone:
+            f.card_idx, f.card_kind = phone.span_idx, "phone"
 
     return f
 
@@ -182,6 +193,15 @@ def format_card(raw: str) -> str:
     digits = re.sub(r"\D", "", raw)
     if len(digits) >= 16:
         return f"{digits[:6]}{'*' * 6}{digits[-4:]}"
+    return raw
+
+
+def format_phone(raw: str) -> str:
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 11 and digits[0] in "78":
+        digits = digits[1:]
+    if len(digits) == 10:
+        return f"+7 ({digits[:3]}) {digits[3:6]}-{digits[6:8]}-{digits[8:]}"
     return raw
 
 
@@ -215,8 +235,12 @@ def build_edits(session: UserSession) -> dict:
         if f.summa_idx is not None:
             edits[f.summa_idx] = amt
 
-    if v.sender      and f.sender_idx    is not None: edits[f.sender_idx]    = v.sender
-    if v.card        and f.card_idx      is not None: edits[f.card_idx]      = format_card(v.card)
+    if v.sender and f.sender_idx is not None:
+        edits[f.sender_idx] = v.sender
+    if v.card and f.card_idx is not None:
+        edits[f.card_idx] = (
+            format_phone(v.card) if f.card_kind == "phone" else format_card(v.card)
+        )
     if v.recipient   and f.recipient_idx is not None: edits[f.recipient_idx] = v.recipient
     if v.bank        and f.bank_idx      is not None: edits[f.bank_idx]      = v.bank
     if v.receipt_num and f.receipt_idx   is not None:
@@ -328,6 +352,12 @@ def ask_sender(session: UserSession) -> str:
 def ask_card(session: UserSession) -> str:
     f = session.fields
     cur = session.spans[f.card_idx].text.strip() if f.card_idx is not None else "—"
+    if f.card_kind == "phone":
+        return (
+            f"📱 *Телефон получателя*\nТекущий: `{cur}`\n\n"
+            "Введите номер телефона (10 цифр или с +7):\n"
+            "_Будет отформатирован: +7 (XXX) XXX-XX-XX_"
+        )
     return (
         f"💳 *Карта получателя*\nТекущая: `{cur}`\n\n"
         "Введите полный номер карты (16 цифр):\n"
@@ -373,7 +403,10 @@ def confirm_text(session: UserSession) -> str:
     if v.sender:
         lines.append(f"👤 Отправитель: `{v.sender}`")
     if v.card:
-        lines.append(f"💳 Карта: `{format_card(v.card)}`")
+        if f.card_kind == "phone":
+            lines.append(f"📱 Телефон: `{format_phone(v.card)}`")
+        else:
+            lines.append(f"💳 Карта: `{format_card(v.card)}`")
     if v.recipient:
         lines.append(f"👤 Получатель: `{v.recipient}`")
     if v.bank:
@@ -434,7 +467,11 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     session = sessions[chat_id]
 
-    await msg.edit_text("✅ Файл загружен. Отвечайте на вопросы или нажимайте «Пропустить».")
+    tmpl = "перевод по телефону" if fields.card_kind == "phone" else "перевод по карте"
+    await msg.edit_text(
+        f"✅ Файл загружен (шаблон: {tmpl}).\n"
+        "Отвечайте на вопросы или нажимайте «Пропустить»."
+    )
     await update.message.reply_text(
         ask_date(session), parse_mode="Markdown", reply_markup=skip_kb()
     )
