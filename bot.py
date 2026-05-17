@@ -159,16 +159,15 @@ def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         for span, new_text in page_edits:
             font_name = resolve_fontname(span, page, doc)
-            rc = page.insert_textbox(
-                fitz.Rect(span.bbox),
+            # insert_text places text at the baseline (bottom of bbox)
+            point = fitz.Point(span.bbox[0], span.bbox[3])
+            page.insert_text(
+                point,
                 new_text,
                 fontname=font_name,
                 fontsize=span.size,
                 color=span.color_rgb(),
-                align=fitz.TEXT_ALIGN_LEFT,
             )
-            if rc < 0:
-                logger.warning("Text clipped on page %d, span %d", page_num, span.span_idx)
 
     buf = io.BytesIO()
     doc.save(buf, garbage=4, deflate=True)
