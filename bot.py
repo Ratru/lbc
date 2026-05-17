@@ -82,17 +82,38 @@ class ReceiptValues:
 
 @dataclass
 class UserSession:
-    doc_path:  str
-    spans:     list
-    file_name: str
-    fields:    ReceiptFields
-    values:    ReceiptValues = field(default_factory=ReceiptValues)
+    doc_path:     str
+    spans:        list
+    file_name:    str
+    fields:       ReceiptFields
+    font_buffers: dict = field(default_factory=dict)
+    values:       ReceiptValues = field(default_factory=ReceiptValues)
 
 
 sessions: dict[int, UserSession] = {}
 
 
 # ── PDF extraction ────────────────────────────────────────────────────────────
+
+def extract_font_buffers(doc_path: str) -> dict:
+    """Extract all embedded font buffers from PDF, keyed by base font name."""
+    doc = fitz.open(doc_path)
+    fonts = {}
+    for page_num in range(len(doc)):
+        for f in doc.get_page_fonts(page_num, full=True):
+            xref, ext, ftype, basefont, name, enc, *_ = f
+            if not xref or basefont in fonts:
+                continue
+            try:
+                buf = doc.extract_font(xref)[3]
+                if buf:
+                    fonts[basefont] = buf
+                    fonts[basefont.split("+", 1)[-1]] = buf
+            except Exception:
+                pass
+    doc.close()
+    return fonts
+
 
 def extract_spans(doc_path: str) -> list:
     doc = fitz.open(doc_path)
@@ -212,7 +233,20 @@ def build_edits(session: UserSession) -> dict:
 
 # ── PDF save ──────────────────────────────────────────────────────────────────
 
-def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
+def get_font(span: TextSpan, font_buffers: dict) -> fitz.Font:
+    """Get the best available font for a span: original PDF font → DejaVu fallback."""
+    for key in (span.font, span.font.split("+", 1)[-1]):
+        buf = font_buffers.get(key)
+        if buf:
+            try:
+                return fitz.Font(fontbuffer=buf)
+            except Exception:
+                pass
+    font_file = FONT_BOLD if (span.flags & 16) else FONT_REGULAR
+    return fitz.Font(fontfile=font_file)
+
+
+def apply_edits(src_path: str, spans: list, edits: dict, font_buffers: dict) -> bytes:
     doc = fitz.open(src_path)
     edits_by_page: dict[int, list] = defaultdict(list)
     for idx, new_text in edits.items():
@@ -224,14 +258,11 @@ def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
             page.add_redact_annot(fitz.Rect(span.bbox))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         for span, new_text in page_edits:
-            font_file = FONT_BOLD if (span.flags & 16) else FONT_REGULAR
-            page.insert_text(
-                fitz.Point(span.bbox[0], span.bbox[3]),
-                new_text,
-                fontfile=font_file,
-                fontsize=span.size,
-                color=span.color_rgb(),
-            )
+            font = get_font(span, font_buffers)
+            tw = fitz.TextWriter(page.rect)
+            tw.append(fitz.Point(span.bbox[0], span.bbox[3]), new_text,
+                      font=font, fontsize=span.size)
+            tw.write_text(page, color=span.color_rgb())
 
     buf = io.BytesIO()
     doc.save(buf, garbage=4, deflate=True)
@@ -383,10 +414,12 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return WAITING_PDF
 
     fields = detect_receipt_fields(spans)
+    font_buffers = extract_font_buffers(doc_path)
     sessions[chat_id] = UserSession(
         doc_path=doc_path, spans=spans,
         file_name=doc.file_name or "document.pdf",
         fields=fields,
+        font_buffers=font_buffers,
     )
     session = sessions[chat_id]
 
@@ -528,7 +561,7 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return WAITING_PDF
 
     try:
-        pdf_bytes = apply_edits(session.doc_path, session.spans, edits)
+        pdf_bytes = apply_edits(session.doc_path, session.spans, edits, session.font_buffers)
     except Exception as e:
         logger.error("apply_edits: %s", e)
         await query.edit_message_text("❌ Ошибка при сохранении PDF.")
