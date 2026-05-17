@@ -17,7 +17,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/3] Проверка обновлений...
+echo [1/4] Проверка обновлений...
 git rev-parse --is-inside-work-tree >nul 2>&1
 if errorlevel 1 (
     echo       Git-репозиторий не найден — пропускаю обновление.
@@ -31,7 +31,12 @@ if errorlevel 1 (
 )
 echo.
 
-echo [2/3] Проверка зависимостей...
+echo [2/4] Остановка предыдущего экземпляра бота...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*bot.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
+echo       Готово.
+echo.
+
+echo [3/4] Проверка зависимостей...
 python -m pip install -r requirements.txt -q
 if errorlevel 1 (
     echo [ERROR] Не удалось установить зависимости.
@@ -39,7 +44,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/3] Запуск бота...
+echo [4/4] Запуск бота...
 echo.
 python bot.py
 
