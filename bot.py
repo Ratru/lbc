@@ -33,12 +33,9 @@ logger = logging.getLogger(__name__)
  STEP_SENDER, STEP_CARD, STEP_RECIPIENT,
  STEP_BANK, STEP_RECEIPT, CONFIRM) = range(10)
 
-BASE14_MAP = {
-    (False, False): "helv",
-    (True, False):  "hebo",
-    (False, True):  "heit",
-    (True, True):   "hebi",
-}
+_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_REGULAR = os.path.join(_DIR, "DejaVuSans.ttf")
+FONT_BOLD    = os.path.join(_DIR, "DejaVuSans-Bold.ttf")
 
 
 @dataclass
@@ -215,26 +212,6 @@ def build_edits(session: UserSession) -> dict:
 
 # ── PDF save ──────────────────────────────────────────────────────────────────
 
-def resolve_fontname(span: TextSpan, page: fitz.Page, doc: fitz.Document) -> str:
-    target = span.font.split("+", 1)[-1].lower()
-    for fnt in page.get_fonts(full=True):
-        xref, _, _, basefont, *_ = fnt
-        if not xref:
-            continue
-        if basefont.split("+", 1)[-1].lower() == target or basefont.lower() == span.font.lower():
-            try:
-                buf = doc.extract_font(xref)[3]
-                if buf:
-                    fname = f"F{xref}"
-                    page.insert_font(fontname=fname, fontbuffer=buf)
-                    return fname
-            except Exception:
-                pass
-    bold   = bool(span.flags & 16)
-    italic = bool(span.flags & 2)
-    return BASE14_MAP[(bold, italic)]
-
-
 def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
     doc = fitz.open(src_path)
     edits_by_page: dict[int, list] = defaultdict(list)
@@ -247,11 +224,11 @@ def apply_edits(src_path: str, spans: list, edits: dict) -> bytes:
             page.add_redact_annot(fitz.Rect(span.bbox))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         for span, new_text in page_edits:
-            font_name = resolve_fontname(span, page, doc)
+            font_file = FONT_BOLD if (span.flags & 16) else FONT_REGULAR
             page.insert_text(
                 fitz.Point(span.bbox[0], span.bbox[3]),
                 new_text,
-                fontname=font_name,
+                fontfile=font_file,
                 fontsize=span.size,
                 color=span.color_rgb(),
             )
